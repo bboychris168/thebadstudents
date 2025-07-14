@@ -20,35 +20,36 @@ def get_next_game(players, games, players_per_game=4):
     consecutive_plays = {p: 0 for p in players}  # Track consecutive games played
     consecutive_sits = {p: 0 for p in players}   # Track consecutive games sat out
     play_counts = {p: 0 for p in players}        # Track total games played
+    last_played_with = {p: set() for p in players}  # Track who each player last played with
     
     # Update tracking based on game history
     for i, game in enumerate(games):
-        # Reset consecutive counts for this game
-        temp_consecutive_plays = {p: 0 for p in players}
-        temp_consecutive_sits = {p: 0 for p in players}
-        
+        # Update play counts and consecutive tracking
         for p in players:
             if p in game:
                 play_counts[p] += 1
-                temp_consecutive_plays[p] = consecutive_plays[p] + 1
-                temp_consecutive_sits[p] = 0
+                consecutive_plays[p] = consecutive_plays.get(p, 0) + 1
+                consecutive_sits[p] = 0
+                # Update who this player played with in their last game
+                if i == len(games) - 1:  # If this was the last game
+                    last_played_with[p] = set(g for g in game if g != p)
             else:
-                temp_consecutive_plays[p] = 0
-                temp_consecutive_sits[p] = consecutive_sits[p] + 1
-        
-        consecutive_plays = temp_consecutive_plays
-        consecutive_sits = temp_consecutive_sits
+                consecutive_plays[p] = 0
+                consecutive_sits[p] = consecutive_sits.get(p, 0) + 1
     
     # If we have 4 or fewer players, they all play
     if len(players) <= players_per_game:
-        return {"playing": players, "sitting": []}
+        return {"playing": players, "sitting": [], "play_counts": play_counts}
     
     # Calculate priority scores for each player
     player_scores = {}
     for p in players:
         score = 0
-        # Heavily penalize consecutive sits
-        if consecutive_sits[p] > 0:
+        # Must play if sat out twice in a row
+        if consecutive_sits[p] >= 2:
+            score -= 10000  # Very high priority to play
+        # Heavily penalize any consecutive sits
+        elif consecutive_sits[p] > 0:
             score -= 1000 * consecutive_sits[p]
         # Penalize consecutive plays beyond 2
         if consecutive_plays[p] >= 2:
@@ -60,24 +61,64 @@ def get_next_game(players, games, players_per_game=4):
     # Sort players by their priority score (lower score = higher priority to play)
     sorted_players = sorted(players, key=lambda p: (player_scores[p], play_counts[p], p))
     
-    # Make adjustments to ensure no more than 2 consecutive plays
+    # Function to check if a player combination is valid
+    def is_valid_combination(current_players):
+        # Check each player against others in the group
+        for p1 in current_players:
+            # Count how many players from their last game are in this game
+            overlap = len(last_played_with[p1].intersection(set(current_players)))
+            if overlap >= 2:  # Allow at most one player from previous game
+                return False
+        return True
+    
+    # Function to find the best valid player to add
+    def find_best_player(current_players, candidates):
+        for p in candidates:
+            if p not in current_players:
+                test_group = current_players + [p]
+                if is_valid_combination(test_group):
+                    return p
+        return None
+    
+    # Make adjustments to ensure no more than 2 consecutive sits and avoid same groups
     playing = []
-    # First, add players who haven't played in a while
+    
+    # First, add players who must play (sat out twice already)
     for p in sorted_players:
         if len(playing) >= players_per_game:
             break
-        if consecutive_sits[p] > 0 or consecutive_plays[p] < 2:
-            playing.append(p)
+        if consecutive_sits[p] >= 2:
+            if not playing or is_valid_combination(playing + [p]):
+                playing.append(p)
+    
+    # Then add players who haven't played recently
+    for p in sorted_players:
+        if len(playing) >= players_per_game:
+            break
+        if p not in playing and (consecutive_sits[p] > 0 or consecutive_plays[p] < 2):
+            if is_valid_combination(playing + [p]):
+                playing.append(p)
     
     # If we still need more players, add from the remaining ones
     remaining = [p for p in sorted_players if p not in playing]
-    while len(playing) < players_per_game and remaining:
-        playing.append(remaining.pop(0))
+    while len(playing) < players_per_game:
+        next_player = find_best_player(playing, remaining)
+        if next_player:
+            playing.append(next_player)
+            remaining.remove(next_player)
+        else:
+            # If no valid player found, just add the next available one
+            next_player = next((p for p in remaining if p not in playing), None)
+            if next_player:
+                playing.append(next_player)
+                remaining.remove(next_player)
+            else:
+                break
     
     # The rest sit out
     sitting = [p for p in players if p not in playing]
     
-    return {"playing": playing, "sitting": sitting}
+    return {"playing": playing, "sitting": sitting, "play_counts": play_counts}
 
 st.set_page_config(layout="wide")
 st.markdown("<h1 style='text-align: center;'>🏸 Badminton Game Scheduler</h1>", unsafe_allow_html=True)
@@ -106,6 +147,7 @@ st.write(", ".join(players))
 game_info = get_next_game(players, games, players_per_game=4)
 next_game = game_info["playing"]
 sitting_players = game_info["sitting"]
+play_counts = game_info["play_counts"]
 
 st.subheader("Next Game")
 # Display players who will play
@@ -169,6 +211,16 @@ st.markdown(
         background: linear-gradient(90deg, #38f9d7 0%, #43e97b 100%);
         transform: scale(1.03);
     }
+    /* Style for reset button */
+    div.stButton > button[data-baseweb="button"]:first-child {
+        background-color: #ff6b6b;
+        color: white;
+        border: none;
+        transition: background-color 0.3s;
+    }
+    div.stButton > button[data-baseweb="button"]:first-child:hover {
+        background-color: #ff5252;
+    }
     </style>
     <script>
     // Add id to the next Streamlit button
@@ -193,6 +245,21 @@ if st.button("Play Next Game", key="play_next_game_btn", help="Add this game to 
 
 # Previous games section below
 st.subheader("Previous Games")
+
+# Add reset button in a container with confirmation
+reset_col1, reset_col2 = st.columns([1, 4])
+with reset_col1:
+    if st.button("Reset Games", type="primary", help="Clear all game history and start fresh"):
+        # Add confirmation dialog
+        confirm = st.button("Click again to confirm reset", key="confirm_reset", type="secondary")
+        if confirm:
+            # Reset the database by creating a new empty one
+            db = {"games": []}
+            save_db(db)
+            st.success("Game history has been reset!")
+            st.rerun()
+
+# Show games if they exist
 if games:
     # Create a consistent color mapping for each unique player
     all_players = set()
@@ -209,11 +276,17 @@ if games:
     ]
     player_colors = {player: colors[i % len(colors)] for i, player in enumerate(sorted(all_players))}
     
+    # Calculate total games played for each player
+    total_plays = {p: 0 for p in all_players}
+    for game in games:
+        for p in game:
+            total_plays[p] = total_plays.get(p, 0) + 1
+    
     # Show the last 20 games, reversed
     for i, game in enumerate(games[::-1][:20], 1):
-        # Create colored player names
+        # Create colored player names with game count
         colored_players = [
-            f'<span style="color: {player_colors[p]}; font-weight: bold;">{p}</span>'
+            f'<span style="color: {player_colors[p]}; font-weight: bold;">{p} ({total_plays[p]})</span>'
             for p in game
         ]
         st.markdown(
